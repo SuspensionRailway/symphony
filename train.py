@@ -87,7 +87,7 @@ log_file = LogFile(log_name_main, log_name_opt)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print(device)
-G = 2
+G = 3
 learning_rate = 5e-5
 explore_time, times = 10240, 50
 capacity = explore_time * times
