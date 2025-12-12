@@ -273,12 +273,12 @@ class Symphony(object):
 
         state, action, reward, next_state, not_done_gamma = self.replay_buffer.sample(self.batch_size)
         self.nets_optimizer.zero_grad(set_to_none=True)
-        self.nets.tau_update()
-
+        
         nets_loss, scale, beta = self.nets(state, action, reward, next_state, not_done_gamma)
 
         nets_loss.backward()
         self.nets_optimizer.step()
+        self.nets.tau_update()
 
         return scale, beta
 
