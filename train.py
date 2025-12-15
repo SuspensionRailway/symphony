@@ -88,7 +88,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print(device)
 G = 3
-learning_rate = 5e-5
+learning_rate = 1e-4
 explore_time, times = 10240, 50
 capacity = explore_time * times
 h_dim = capacity//1000
