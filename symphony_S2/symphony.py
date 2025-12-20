@@ -95,9 +95,9 @@ class ReSine(jit.ScriptModule):
 
 #SilentDropout
 # nn.Module -> JIT C++ graph
-class SilentDropout(jit.ScriptModule):
+class GradientDropout(jit.ScriptModule):
     def __init__(self, p=0.5):
-        super(SilentDropout, self).__init__()
+        super(GradientDropout, self).__init__()
         self.p = p
 
     @jit.script_method
@@ -136,7 +136,7 @@ class FeedForward(jit.ScriptModule):
             nn.Linear(h_dim, h_dim),
             ReSine(h_dim),
             nn.Linear(h_dim, f_out),
-            SilentDropout()
+            GradientDropout()
         )
 
 
@@ -239,7 +239,7 @@ class Nets(jit.ScriptModule):
         nets_loss = -self.rehae((q_next_target - q_next_ema)/q_next_ema.abs()) + self.rehse(q_pred-q_target) + self.sw(next_scale, next_beta) 
         self.q_next_ema = q_next_ema.mean()
 
-        return nets_loss, next_scale.detach(), next_beta.detach()
+        return nets_loss, next_scale.detach()
 
 
 
@@ -277,13 +277,13 @@ class Symphony(object):
         state, action, reward, next_state, not_done_gamma = self.replay_buffer.sample(self.batch_size)
         self.nets_optimizer.zero_grad(set_to_none=True)
         
-        nets_loss, scale, beta = self.nets(state, action, reward, next_state, not_done_gamma)
+        nets_loss, scale = self.nets(state, action, reward, next_state, not_done_gamma)
 
         nets_loss.backward()
         self.nets_optimizer.step()
         self.nets.tau_update()
 
-        return scale, beta
+        return scale
 
 
 
