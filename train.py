@@ -88,14 +88,14 @@ def save(algo, total_rewards, total_steps):
 def load(algo, Q_learning):
 
     total_rewards, total_steps = [], 0
-    
+
     try:
         print("loading models...")
         algo.nets.online.load_state_dict(torch.load('nets_online_model.pt', weights_only=True))
         algo.nets.target.load_state_dict(torch.load('nets_target_model.pt', weights_only=True))
         algo.nets_optimizer.load_state_dict(torch.load('nets_optimizer.pt', weights_only=True))
         print('models loaded')
-        #sim_loop(env_valid, True, 100, False, algo, [], total_steps=0)
+        #sim_loop(env_valid, 100, True, False, algo, [], total_steps=0)
     except:
         print("problem during loading models")
 
@@ -163,7 +163,7 @@ algo = Symphony(capacity, state_dim, action_dim, h_dim, device, max_action, lear
 
 
 # Loop for episodes:[ State -> Loop for one episode: [ Action, Next State, Reward, Done, State = Next State ] ]
-def sim_loop(env, testing, episodes, Q_learning, algo, total_rewards, total_steps):
+def sim_loop(env, episodes, testing, Q_learning, algo, total_rewards, total_steps):
 
 
     start_episode = len(total_rewards) + 1
@@ -193,7 +193,7 @@ def sim_loop(env, testing, episodes, Q_learning, algo, total_rewards, total_step
                 save(algo, total_rewards, total_steps)
                 print("start testing")
                 log_file.write(str(total_steps) + ",")
-                Return = sim_loop(env_test, True, 25, Q_learning, algo, [], total_steps=0)
+                Return = sim_loop(env_test, 25, True, Q_learning, algo, [], total_steps=0)
                 print("end of testing")
                 log_file.write(str(round(Return, 2)) + "\n")
 
@@ -230,7 +230,7 @@ Q_learning, total_rewards, total_steps = load(algo, Q_learning)
 if not Q_learning: log_file.clean()
 
 # Training
-sim_loop(env, False, 1000000, Q_learning, algo, total_rewards, total_steps)
+sim_loop(env, num_episodes, False, Q_learning, algo, total_rewards, total_steps)
 
 
 
