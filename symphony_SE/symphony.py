@@ -160,7 +160,7 @@ class ActorCritic(jit.ScriptModule):
 
         self.a = FeedForward(state_dim, h_dim, 3*action_dim)
         self.a_max = nn.Parameter(data= max_action, requires_grad=False)
-        self.std = 1/math.e
+        self.std = 1/math.pi
 
         self.qA = FeedForward(state_dim+action_dim, h_dim, q_nodes)
         self.qB = FeedForward(state_dim+action_dim, h_dim, q_nodes)
@@ -182,7 +182,7 @@ class ActorCritic(jit.ScriptModule):
     def actor(self, state, action:bool = True, noise:bool=True):
         ASB = torch.tanh(self.a(state)/2).reshape(-1, 3, self.action_dim)
         A, S, B =   ASB [:, 0], ASB[:, 1].abs(), ASB[:, 2].abs()
-        N = self.std * torch.randn_like(A).clamp(-math.e, math.e)
+        N = self.std * torch.randn_like(A).clamp(-math.pi, math.pi)
         return self.a_max * torch.tanh(float(action) * S * A + float(noise) * N), S.clamp(self.e, self.e_), B.clamp(self.e, self.e_)
 
     #========= Critic Forward Pass =========
@@ -370,3 +370,4 @@ class ReplayBuffer:
         self.probs =  weights/torch.sum(weights)
 
         print("new replay buffer length: ", self.length)
+
