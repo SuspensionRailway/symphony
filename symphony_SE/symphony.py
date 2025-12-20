@@ -107,7 +107,7 @@ class SilentDropout(jit.ScriptModule):
 
 
 class Swaddling(jit.ScriptModule):
-    def __init__(self, beta=0.5):
+    def __init__(self):
         super(Swaddling, self).__init__()
 
     @jit.script_method
@@ -128,6 +128,7 @@ class Swaddling(jit.ScriptModule):
 class FeedForward(jit.ScriptModule):
     def __init__(self, f_in, h_dim, f_out):
         super(FeedForward, self).__init__()
+
 
         self.ffw = nn.Sequential(
             nn.Linear(f_in, h_dim),
@@ -159,12 +160,13 @@ class ActorCritic(jit.ScriptModule):
 
         self.a = FeedForward(state_dim, h_dim, 3*action_dim)
         self.a_max = nn.Parameter(data= max_action, requires_grad=False)
-        self.std = 1/math.pi
+        self.std = 1/math.e
 
         self.qA = FeedForward(state_dim+action_dim, h_dim, q_nodes)
         self.qB = FeedForward(state_dim+action_dim, h_dim, q_nodes)
         self.qC = FeedForward(state_dim+action_dim, h_dim, q_nodes)
         self.qnets = nn.ModuleList([self.qA, self.qB, self.qC])
+
 
         self.q_dist = q_nodes*len(self.qnets)
         indexes = torch.arange(0, self.q_dist, 1)/self.q_dist
@@ -180,7 +182,7 @@ class ActorCritic(jit.ScriptModule):
     def actor(self, state, action:bool = True, noise:bool=True):
         ASB = torch.tanh(self.a(state)/2).reshape(-1, 3, self.action_dim)
         A, S, B =   ASB [:, 0], ASB[:, 1].abs(), ASB[:, 2].abs()
-        N = self.std * torch.randn_like(A).clamp(-math.pi, math.pi)
+        N = self.std * torch.randn_like(A).clamp(-math.e, math.e)
         return self.a_max * torch.tanh(float(action) * S * A + float(noise) * N), S.clamp(self.e, self.e_), B.clamp(self.e, self.e_)
 
     #========= Critic Forward Pass =========
@@ -236,7 +238,7 @@ class Nets(jit.ScriptModule):
         nets_loss = -self.rehae((q_next_target - q_next_ema)/q_next_ema.abs()) + self.rehse(q_pred-q_target) + self.sw(next_scale, next_beta) 
         self.q_next_ema = q_next_ema.mean()
 
-        return nets_loss, next_scale.detach(), next_beta.detach()
+        return nets_loss, next_scale.detach()
 
 
 
@@ -274,14 +276,13 @@ class Symphony(object):
         state, action, reward, next_state, not_done_gamma = self.replay_buffer.sample(self.batch_size)
         self.nets_optimizer.zero_grad(set_to_none=True)
         
-
-        nets_loss, scale, beta = self.nets(state, action, reward, next_state, not_done_gamma)
+        nets_loss, scale = self.nets(state, action, reward, next_state, not_done_gamma)
 
         nets_loss.backward()
         self.nets_optimizer.step()
         self.nets.tau_update()
 
-        return scale, beta
+        return scale
 
 
 
