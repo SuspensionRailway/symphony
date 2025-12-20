@@ -1,16 +1,22 @@
+from symphony import Symphony
+import gymnasium as gym
+
 import logging
 logging.getLogger().setLevel(logging.CRITICAL)
 import torch
 import numpy as np
-import gymnasium as gym
 import random
 import pickle
-from symphony import Symphony
-import math
+import time
 import os, re
 
-np.set_printoptions(threshold=10000, linewidth=200)
+#############################################
+# -----------Helper Functions---------------#
+#############################################
 
+
+
+# random seeds for reproducing the experiment
 def seed_reset():
     r1, r2, r3 = random.randint(0,2**32-1), random.randint(0,2**32-1), random.randint(0,2**32-1)
     torch.manual_seed(r1)
@@ -18,17 +24,9 @@ def seed_reset():
     random.seed(r3)
     return r1, r2, r3
 
-#==============================================================================================
-#==============================================================================================
-#=========================================LOGGING=============================================
-#==============================================================================================
-#==============================================================================================
-
-# to continue writing to the same history file and derive its name. This function created with the help of ChatGPT
-
 
 def extract_r1_r2_r3():
-    pattern = r'history_(\d+)_(\d+)_(\d+)\.log'
+    pattern = r'history_(\d+)_(\d+)_(\d+)\.csv'
 
     # Iterate through the files in the given directory
     for filename in os.listdir():
@@ -53,12 +51,13 @@ class LogFile(object):
             file.write(text)
     def clean(self):
         with open(self.log_name_main, 'w') as file:
-            file.write("")
+            file.write("step,return\n")
         with open(self.log_name_opt, 'w') as file:
-            file.write("")
+            file.write("ep,return,steps,scale\n")
 
 
 numbers = extract_r1_r2_r3()
+
 if numbers != None:
     # derive random numbers from history file
     r1, r2, r3 = numbers
@@ -70,25 +69,64 @@ else:
 
 print(r1, ", ", r2, ", ", r3)
 
-log_name_main = "history_" + str(r1) + "_" + str(r2) + "_" + str(r3) + ".log"
-log_name_opt = "episodes_" + str(r1) + "_" + str(r2) + "_" + str(r3) + ".log"
+log_name_main = "history_" + str(r1) + "_" + str(r2) + "_" + str(r3) + ".csv"
+log_name_opt = "episodes_" + str(r1) + "_" + str(r2) + "_" + str(r3) + ".csv"
 log_file = LogFile(log_name_main, log_name_opt)
 
 
-#==============================================================================================
-#==============================================================================================
-#===================================SCRIPT FOR TRAINING========================================
-#==============================================================================================
-#==============================================================================================
+def save(algo, total_rewards, total_steps):
+
+    torch.save(algo.nets.online.state_dict(), 'nets_online_model.pt')
+    torch.save(algo.nets.target.state_dict(), 'nets_target_model.pt')
+    torch.save(algo.nets_optimizer.state_dict(), 'nets_optimizer.pt')
+    print("saving... the buffer length = ", algo.replay_buffer.length, end="")
+    with open('data', 'wb') as file:
+        pickle.dump({'buffer': algo.replay_buffer, 'q_next_ema': algo.nets.q_next_ema, 'total_rewards': total_rewards, 'total_steps': total_steps}, file)
+    print(" > done")
 
 
+def load(algo, Q_learning):
+
+    total_rewards, total_steps = [], 0
+
+    try:
+        print("loading models...")
+        algo.nets.online.load_state_dict(torch.load('nets_online_model.pt', weights_only=True))
+        algo.nets.target.load_state_dict(torch.load('nets_target_model.pt', weights_only=True))
+        algo.nets_optimizer.load_state_dict(torch.load('nets_optimizer.pt', weights_only=True))
+        print('models loaded')
+        #sim_loop(env_valid, 100, True, False, algo, [], total_steps=0)
+    except:
+        print("problem during loading models")
+
+
+    try:
+        print("loading buffer...")
+        with open('data', 'rb') as file:
+            dict = pickle.load(file)
+            algo.replay_buffer = dict['buffer']
+            algo.nets.q_next_ema = dict['q_next_ema']
+            total_rewards = dict['total_rewards']
+            total_steps = dict['total_steps']
+            if algo.replay_buffer.length>=explore_time and not Q_learning: Q_learning = True
+        
+        print('buffer loaded, Q_ema', round(algo.nets.q_next_ema.item(), 2), ', average_reward = ', round(np.mean(total_rewards[-300:]), 2))
+        
+    except:
+        print("problem during loading buffer")
+
+    return Q_learning, total_rewards, total_steps
+
+#############################################
+# ---------------Parametres-----------------#
+#############################################
 
 #global parameters
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print(device)
 G = 2
-learning_rate = 5e-5
+learning_rate = 1e-4
 explore_time, times = 7680, 50
 capacity = explore_time * times
 h_dim = capacity//1000
@@ -124,161 +162,76 @@ print("action_dim: ", action_dim, "state_dim: ", state_dim, "max_action:", max_a
 algo = Symphony(capacity, state_dim, action_dim, h_dim, device, max_action, learning_rate)
 
 
+# Loop for episodes:[ State -> Loop for one episode: [ Action, Next State, Reward, Done, State = Next State ] ]
+def sim_loop(env, episodes, testing, Q_learning, algo, total_rewards, total_steps):
 
 
-#==============================================================================================
-#==============================================================================================
-#==========================================TESTING=============================================
-#==============================================================================================
-#==============================================================================================
+    start_episode = len(total_rewards) + 1
 
-#testing model
-def testing(env, limit_step, test_episodes, current_step=0, save_log=False):
-    if test_episodes<1: return
-    print("Validation... ", test_episodes, " epsodes")
-    episode_return = []
 
-    for test_episode in range(test_episodes):
-
+    for episode in range(start_episode, episodes+1):
+            
+        Return = 0.0     
         state = env.reset()[0]
-        rewards = []
-
+        
         for steps in range(1,limit_step+1):
-            action = algo.select_action(state, noise=False)
-            next_state, reward, done, truncated, info = env.step(action)
-            rewards.append(reward)
-            state = next_state
-            if done or truncated: break
-
-        episode_return.append(np.sum(rewards))
-
-        validate_return = np.mean(episode_return[-100:])
-        print(f"trial {test_episode+1}:, Rtrn = {episode_return[test_episode]:.2f}, Average 100 = {validate_return:.2f}, steps: {steps}")
-
-    if save_log: log_file.write(str(current_step) + " : " + str(round(validate_return.item(), 2)) +  "\n")
-
-
-#==============================================================================================
-#==============================================================================================
-#=====================LOADING EXISTING MODELS, BUFFER and PARAMETERS===========================
-#==============================================================================================
-#==============================================================================================
-
-
-
-def save_data_models():
-    print("saving data...")
-    torch.save(algo.nets.online.state_dict(), 'nets_model.pt')
-    torch.save(algo.nets.target.state_dict(), 'nets_target_model.pt')
-    torch.save(algo.nets_optimizer.state_dict(), 'nets_optimizer.pt')
-    with open('data', 'wb') as file:
-        pickle.dump({'buffer': algo.replay_buffer, 'q_next_ema': algo.nets.q_next_ema, 'episode_rewards_all':episode_rewards_all, 'episode_steps_all':episode_steps_all, 'total_steps': total_steps}, file)
-    print("...saved")
-
-
-try:
-    print("loading buffer...")
-    with open('data', 'rb') as file:
-        dict = pickle.load(file)
-        algo.replay_buffer = dict['buffer']
-        algo.nets.q_next_ema = dict['q_next_ema']
-        episode_rewards_all = dict['episode_rewards_all']
-        episode_steps_all = dict['episode_steps_all']
-        total_steps = dict['total_steps']
-        if len(algo.replay_buffer)>=explore_time and not Q_learning: Q_learning = True
-    print('buffer loaded, buffer length', len(algo.replay_buffer))
-
-    start_episode = len(episode_steps_all)+1
-
-except:
-    print("problem during loading buffer")
-
-
-try:
-    print("loading models...")
-    algo.nets.online.load_state_dict(torch.load('nets_model.pt', weights_only=True))
-    algo.nets.target.load_state_dict(torch.load('nets_target_model.pt', weights_only=True))
-    print('models loaded')
-    if pre_valid: testing(env_valid, limit_eval, 100)
-except:
-    print("problem during loading models")
-
-
-try:
-    algo.nets_optimizer.load_state_dict(torch.load('nets_optimizer.pt', weights_only=True))
-    print("optimizer loaded...")
-except:
-    print("problem during loading optimizer")
-#==============================================================================================
-#==============================================================================================
-#========================================EXPLORATION===========================================
-#==============================================================================================
-#==============================================================================================
-
-
-
-if not Q_learning:
-    log_file.clean()
-    
-    while not Q_learning:
-        rewards = []
-        state = env_test.reset()[0]
-
-        for steps in range(1, limit_step+1):
 
             seed_reset()
-            action = algo.select_action(state)
-            next_state, reward, done, truncated, info = env_test.step(action)
-            rewards.append(reward)
-            if algo.replay_buffer.length>=explore_time and not Q_learning: Q_learning = True; break
-            algo.replay_buffer.add(state, action, reward, next_state, done)
-            if done: break
+            total_steps += 1
+
+            # Activate training if explore time is reached and if it is not testing mode:
+            if testing:
+                Q_learning = False
+            else:
+                if algo.replay_buffer.length>=explore_time and not Q_learning:
+                    Q_learning = True
+                    algo.replay_buffer.norm_fill(times)
+                    print("started training")
+
+            # if total steps is divisible to 2500 save models, stop training and do testing, return to training:
+            if Q_learning and total_steps>=2500 and total_steps%2500==0:
+                save(algo, total_rewards, total_steps)
+                print("start testing")
+                log_file.write(str(total_steps) + ",")
+                Return = sim_loop(env_test, 25, True, Q_learning, algo, [], total_steps=0)
+                print("end of testing")
+                log_file.write(str(round(Return, 2)) + "\n")
+
+
+            # if steps is close to episode limit (e.g. 950) we shut down actions and leave noise to get Terminal Transition:
+            active = steps<(limit_step-50) if Q_learning else True
+            action = algo.select_action(state,  action=active, noise=not testing)
+            next_state, reward, done, truncated, info = env.step(action)
+            if not testing: algo.replay_buffer.add(state, action, reward, next_state, done)
+            Return += reward
+            
+            # actual training
+            if Q_learning: [scale := algo.train() for _ in range(G)]
+            if done or truncated: break
             state = next_state
 
-        Return = np.sum(rewards)
-        print(f" Rtrn = {Return:.2f}")
-
-    algo.replay_buffer.norm_fill(times)
-
-    
-
-#==============================================================================================
-#==============================================================================================
-#=========================================TRAINING=============================================
-#==============================================================================================
-#==============================================================================================
 
 
-for i in range(start_episode, num_episodes):
+        total_rewards.append(Return)
+        average_reward = np.mean(total_rewards[-300:])
 
-    rewards = []
-    state = env.reset()[0]
-   
 
-    for steps in range(1, limit_step+1):
-        
-        
-        seed_reset()
-        total_steps += 1
-        
-        # save models, data
-        if (total_steps>=2500 and total_steps%2500==0):
-            testing(env_test, limit_step=limit_eval, test_episodes=25, current_step=total_steps, save_log=True)
-            if total_steps%5000==0: save_data_models()
-
-   
-        action = algo.select_action(state, action=(steps<limit_step-50))
-        next_state, reward, done, truncated, info = env.step(action)
-        rewards.append(reward)
-        algo.replay_buffer.add(state, action, reward, next_state, done)
-        for _ in range(G): scale, beta = algo.train()
-        if done: break
-        state = next_state
+        print(f"Ep {episode}: Rtrn = {Return:.2f}, Avg = {average_reward:.2f}| ep steps = {steps} | total_steps = {total_steps}") 
+        if not testing and Q_learning: log_file.write_opt(str(episode) + "," + str(round(Return, 2)) + "," + str(total_steps) + "," + str(round(scale.mean().item(), 4)) + "\n")
         
 
-    
-    episode_rewards_all.append(np.sum(rewards))
-    episode_steps_all.append(steps)
-    
-    print(f"Ep {i}: Rtrn = {episode_rewards_all[-1]:.2f} | ep steps = {steps} | total_steps = {total_steps}  | scale = {((scale)).mean().item():.4f} | beta = {((beta)).mean().item():.4f} ")
-    log_file.write_opt(str(i) + " : " + str(round(episode_rewards_all[-1], 2)) + " : step : " + str(total_steps) + " : S : " + str(round(((scale)).mean().item(), 4)) + " : B : " + str(round(((beta)).mean().item(), 4)) + "\n")
+    return np.mean(total_rewards).item()
+
+
+
+
+# Loading existing models
+Q_learning, total_rewards, total_steps = load(algo, Q_learning)
+if not Q_learning: log_file.clean()
+
+# Training
+sim_loop(env, num_episodes, False, Q_learning, algo, total_rewards, total_steps)
+
+
+
+
