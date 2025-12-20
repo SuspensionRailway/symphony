@@ -129,6 +129,7 @@ class FeedForward(jit.ScriptModule):
     def __init__(self, f_in, h_dim, f_out):
         super(FeedForward, self).__init__()
 
+
         self.ffw = nn.Sequential(
             nn.Linear(f_in, h_dim),
             nn.LayerNorm(h_dim),
@@ -165,6 +166,7 @@ class ActorCritic(jit.ScriptModule):
         self.qB = FeedForward(state_dim+action_dim, h_dim, q_nodes)
         self.qC = FeedForward(state_dim+action_dim, h_dim, q_nodes)
         self.qnets = nn.ModuleList([self.qA, self.qB, self.qC])
+
 
         self.q_dist = q_nodes*len(self.qnets)
         indexes = torch.arange(0, self.q_dist, 1)/self.q_dist
@@ -236,7 +238,7 @@ class Nets(jit.ScriptModule):
         nets_loss = -self.rehae((q_next_target - q_next_ema)/q_next_ema.abs()) + self.rehse(q_pred-q_target) + self.sw(next_scale, next_beta) 
         self.q_next_ema = q_next_ema.mean()
 
-        return nets_loss, next_scale.detach(), next_beta.detach()
+        return nets_loss, next_scale.detach()
 
 
 
@@ -274,13 +276,13 @@ class Symphony(object):
         state, action, reward, next_state, not_done_gamma = self.replay_buffer.sample(self.batch_size)
         self.nets_optimizer.zero_grad(set_to_none=True)
         
-        nets_loss, scale, beta = self.nets(state, action, reward, next_state, not_done_gamma)
+        nets_loss, scale = self.nets(state, action, reward, next_state, not_done_gamma)
 
         nets_loss.backward()
         self.nets_optimizer.step()
         self.nets.tau_update()
 
-        return scale, beta
+        return scale
 
 
 
