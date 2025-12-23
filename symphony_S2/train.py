@@ -192,10 +192,9 @@ def sim_loop(env, episodes, testing, Q_learning, algo, total_rewards, total_step
             if Q_learning and total_steps>=2500 and total_steps%2500==0:
                 save(algo, total_rewards, total_steps)
                 print("start testing")
-                log_file.write(str(total_steps) + ",")
-                Return = sim_loop(env_test, 25, True, Q_learning, algo, [], total_steps=0)
+                test_return = sim_loop(env_test, 25, True, Q_learning, algo, [], total_steps=0)
+                log_file.write(str(total_steps) + "," + str(round(test_return, 2)) + "\n")
                 print("end of testing")
-                log_file.write(str(round(Return, 2)) + "\n")
 
 
             # if steps is close to episode limit (e.g. 950) we shut down actions and leave noise to get Terminal Transition:
