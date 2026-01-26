@@ -93,17 +93,19 @@ class ReSine(jit.ScriptModule):
         x = s*torch.sin(x/s)
         return x/(1+torch.exp(-1.5*x/s))
 
-#SilentDropout
+#GradientDropout
 # nn.Module -> JIT C++ graph
-class SilentDropout(jit.ScriptModule):
-    def __init__(self, p=0.5):
-        super(SilentDropout, self).__init__()
-        self.p = p
+class GradientDropout(jit.ScriptModule):
+    def __init__(self):
+        super(GradientDropout, self).__init__()
+
 
     @jit.script_method
     def forward(self, x):
-        mask = (torch.rand_like(x) > self.p).float()
-        return  mask * x + (1.0-mask) * x.detach()
+        p =  torch.sigmoid(torch.randn_like(x))
+        mask = (torch.rand_like(x) > p).float()
+        return mask * x + (1.0 - mask) * x.detach()
+
 
 
 class Swaddling(jit.ScriptModule):
@@ -135,7 +137,8 @@ class FeedForward(jit.ScriptModule):
             nn.LayerNorm(h_dim),
             nn.Linear(h_dim, h_dim),
             ReSine(h_dim),
-            nn.Linear(h_dim, f_out)
+            nn.Linear(h_dim, f_out),
+            GradientDropout()
         )
 
 
@@ -170,7 +173,7 @@ class ActorCritic(jit.ScriptModule):
 
         self.q_dist = q_nodes*len(self.qnets)
         indexes = torch.arange(0, self.q_dist, 1)/self.q_dist
-        weights = torch.tanh((math.pi*(1-indexes))**math.e)
+        weights = torch.tanh((math.pi*(1-indexes))**math.e) - 0.02*torch.exp(-(indexes/0.02)**2)
         self.probs = nn.Parameter(data= weights/torch.sum(weights), requires_grad=False)
 
         self.e = 1e-3
@@ -227,7 +230,7 @@ class Nets(jit.ScriptModule):
 
 
     @jit.script_method
-    def forward(self, state, action, reward, next_state, not_done_gamma):
+    def loss(self, state, action, reward, next_state, not_done_gamma):
 
         next_action, next_scale, next_beta = self.online.actor(next_state)
         q_next_target, q_next_target_value = self.target.critic_soft(next_state, next_action)
@@ -235,10 +238,11 @@ class Nets(jit.ScriptModule):
         q_pred = self.online.critic(state, action)
 
         q_next_ema = self.alpha * self.q_next_ema + self.alpha_ * q_next_target_value
-        nets_loss = -self.rehae((q_next_target - q_next_ema)/q_next_ema.abs()) + self.rehse(q_pred-q_target) + self.sw(next_scale, next_beta) 
+        net_loss = -self.rehae((q_next_target - q_next_ema)/q_next_ema.abs()) + self.rehse(q_pred-q_target) + self.sw(next_scale, next_beta) 
         self.q_next_ema = q_next_ema.mean()
 
-        return nets_loss, next_scale.detach()
+        return net_loss
+        
 
 
 
@@ -256,7 +260,7 @@ class Symphony(object):
         self.nets_optimizer = Adam(self.nets.online.parameters(), lr=learning_rate)
         self.batch_size = self.nets.online.q_dist
 
-
+    
     def select_action(self, state, action = True, noise=True):
         state = torch.tensor(state, dtype=torch.float32, device=self.device).reshape(-1,self.state_dim)
         with torch.no_grad(): action = self.nets.online.actor(state, action, noise)[0]
@@ -276,14 +280,10 @@ class Symphony(object):
         state, action, reward, next_state, not_done_gamma = self.replay_buffer.sample(self.batch_size)
         self.nets_optimizer.zero_grad(set_to_none=True)
         
-        nets_loss, scale = self.nets(state, action, reward, next_state, not_done_gamma)
+        self.nets.loss(state, action, reward, next_state, not_done_gamma).backward()
 
-        nets_loss.backward()
         self.nets_optimizer.step()
         self.nets.tau_update()
-
-        return scale
-
 
 
 
@@ -301,33 +301,30 @@ class ReplayBuffer:
         self.not_dones_gamma = torch.zeros((self.capacity, 1), dtype=torch.float32, device=device)
 
         self.norm = 1.0
-
+        self.ptr = 0
 
     def add(self, state, action, reward, next_state, done):
 
-        if self.length<self.capacity: self.length += 1
+        if self.length < self.capacity:
+            self.length += 1
+        elif self.not_dones_gamma[self.ptr].item() <= 3e-8:
+            self.not_dones_gamma[self.ptr] += 1e-8
+            self.ptr = (self.ptr + 1) % self.capacity
 
-        idx = self.length-1
+        # direct assignment to stay in-place
+        self.states[self.ptr] = torch.as_tensor(state, dtype=torch.float32, device=self.device)
+        self.actions[self.ptr] = torch.as_tensor(action, dtype=torch.float32, device=self.device)
+        self.rewards[self.ptr] = torch.as_tensor([reward / self.norm], dtype=torch.float32, device=self.device)
+        self.next_states[self.ptr] = torch.as_tensor(next_state, dtype=torch.float32, device=self.device)
+        self.not_dones_gamma[self.ptr] = torch.as_tensor([0.99 * (1.0 - float(done))], dtype=torch.float32, device=self.device)
 
-        self.states[idx,:] = torch.tensor(state, dtype=torch.float32, device=self.device)
-        self.actions[idx,:] = torch.tensor(action, dtype=torch.float32, device=self.device)
-        self.rewards[idx,:] = torch.tensor([reward/self.norm], dtype=torch.float32, device=self.device)
-        self.next_states[idx,:] = torch.tensor(next_state, dtype=torch.float32, device=self.device)
-        self.not_dones_gamma[idx,:] = torch.tensor([0.99 * (1.0 - float(done))], dtype=torch.float32, device=self.device)
-
-        if self.length>=self.capacity:
-            shift = 2 if self.not_dones_gamma[0,:].item() == 0.0 else 1
-            self.states = torch.roll(self.states, shifts=-shift, dims=0)
-            self.actions = torch.roll(self.actions, shifts=-shift, dims=0)
-            self.rewards = torch.roll(self.rewards, shifts=-shift, dims=0)
-            self.next_states = torch.roll(self.next_states, shifts=-shift, dims=0)
-            self.not_dones_gamma = torch.roll(self.not_dones_gamma, shifts=-shift, dims=0)
-
-
+        # advance pointer
+        self.ptr = (self.ptr + 1) % self.capacity
 
     def sample(self, batch_size):
 
-        indices = torch.multinomial(self.probs, num_samples=batch_size, replacement=True)
+        indices = torch.multinomial(self.probs, num_samples=batch_size, replacement=True) # fixed indexes
+        indices.add_(self.ptr).remainder_(self.capacity)
 
         return (
             self.states[indices],
@@ -348,25 +345,37 @@ class ReplayBuffer:
     #==============================================================
     #==============================================================
 
-    def norm_fill(self, times:int):
+    def _inplace_repeat(self, original_len, times):
+        current_idx = original_len
+        for _ in range(1, times):
+            space_left = self.capacity - current_idx
+            if space_left <= 0: break
+            
+            copy_size = min(original_len, space_left)
+            
+            self.states[current_idx : current_idx + copy_size] = self.states[:copy_size]
+            self.actions[current_idx : current_idx + copy_size] = self.actions[:copy_size]
+            self.rewards[current_idx : current_idx + copy_size] = self.rewards[:copy_size]
+            self.next_states[current_idx : current_idx + copy_size] = self.next_states[:copy_size]
+            self.not_dones_gamma[current_idx : current_idx + copy_size] = self.not_dones_gamma[:copy_size]
+            
+            current_idx += copy_size
+        return current_idx
 
+    def norm_fill(self, times: int):
 
         print("copying replay data, current length", self.length)
 
-        self.states = self.states[:self.length].repeat(times, 1)
-        self.actions = self.actions[:self.length].repeat(times, 1)
-        self.rewards = self.rewards[:self.length].repeat(times, 1)
-        self.next_states = self.next_states[:self.length].repeat(times, 1)
-        self.not_dones_gamma = self.not_dones_gamma[:self.length].repeat(times, 1)
+        self.norm = torch.mean(torch.abs(self.rewards[:self.length])).item()
+        self.rewards[:self.length] /= self.norm
 
-        self.norm = torch.mean(torch.abs(self.rewards)).item()
+        self._inplace_repeat(self.length, times)
+        
+        self.length = self.capacity
+        self.ptr = 0
 
-        self.rewards /= self.norm
-
-        self.length = times*self.length
-
-        norm_index = torch.arange(0, self.length, 1)/self.length
-        weights = torch.tanh((math.pi*norm_index)**math.e)
-        self.probs =  weights/torch.sum(weights)
+        indexes = torch.arange(0, self.length, 1, device=self.device) / self.length
+        weights = torch.tanh((math.pi * indexes) ** math.e) - 0.02 * torch.exp(-((indexes - 1) / 0.02) ** 2)
+        self.probs = weights / torch.sum(weights)
 
         print("new replay buffer length: ", self.length)
